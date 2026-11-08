@@ -1222,40 +1222,49 @@ pub fn decode_components(components: Option<&Tag>) -> (u32, Option<Box<StackData
 /// The `[id=value,...]` component list of an item argument (`ItemParser`)
 /// as a `components` compound, retaining `!id` removal patches.
 pub fn command_components(text: &str) -> Result<Tag, String> {
+    use horizon_world::component_patch::Patch;
+
     let inner = text
         .strip_prefix('[')
         .and_then(|t| t.strip_suffix(']'))
         .ok_or("expected '['")?;
-    let mut entries = horizon_world::nbt::Compound::new();
+    let mut patch_entries = Vec::new();
     let mut rest = inner.trim_start();
     while !rest.is_empty() {
+        let removed = rest.starts_with('!');
+        if removed {
+            rest = rest[1..].trim_start();
+        }
         let end = rest.find(['=', ',']).unwrap_or(rest.len());
         let key = rest[..end].trim();
         rest = &rest[end..];
-        if let Some(value) = rest.strip_prefix('=') {
-            let (tag, used) = horizon_world::nbt::parse_snbt(value)?;
-            let id = if key.contains(':') {
-                key.to_owned()
-            } else {
-                format!("minecraft:{key}")
-            };
-            entries.insert(JavaString::from(id.as_str()), tag);
-            rest = &value[used..];
-        } else if let Some(key) = key.strip_prefix('!') {
-            let id = if key.contains(':') {
-                format!("!{key}")
-            } else {
-                format!("!minecraft:{key}")
-            };
-            entries.insert(
-                JavaString::from(id.as_str()),
-                Tag::compound([] as [(&str, Tag); 0]),
-            );
-        }
+        let id = if key.contains(':') {
+            key.to_owned()
+        } else {
+            format!("minecraft:{key}")
+        };
+        let value = if removed {
+            None
+        } else if let Some(value_str) = rest.strip_prefix('=') {
+            let (tag, used) = horizon_world::nbt::parse_snbt(value_str)?;
+            rest = &value_str[used..];
+            Some(tag)
+        } else {
+            return Err(format!("expected '=' after component '{key}'"));
+        };
+        patch_entries.push((id, value));
         rest = rest.trim_start();
         rest = rest.strip_prefix(',').unwrap_or(rest).trim_start();
     }
-    Ok(Tag::Compound(entries))
+    let patch = Patch::new(patch_entries);
+    let entries = patch.entries().iter().map(|(key, value)| match value {
+        Some(tag) => (JavaString::from(key.as_str()), tag.clone()),
+        None => (
+            JavaString::from(format!("!{key}").as_str()),
+            Tag::compound([] as [(&str, Tag); 0]),
+        ),
+    });
+    Ok(Tag::Compound(entries.collect()))
 }
 #[cfg(test)]
 mod tests {
@@ -2126,6 +2135,24 @@ mod tests {
         );
         assert_eq!(explosions[0].colors, vec![0xFF0000]);
         assert!(explosions[0].twinkle && !explosions[0].trail);
+    }
+
+    #[test]
+    fn command_components_preserves_explicit_removals() {
+        let tag = command_components("[!max_damage,custom_data={keep:1}]").unwrap();
+        let (damage, extra) = decode_components(Some(&tag));
+        let stack = ItemStack {
+            item: "minecraft:iron_helmet".into(),
+            count: 1,
+            damage,
+            extra,
+        };
+        let patch = encode_components(&stack).unwrap();
+        assert!(patch.get("!minecraft:max_damage").is_some());
+        assert_eq!(
+            patch.get("minecraft:custom_data").unwrap().get("keep"),
+            Some(&Tag::Int(1))
+        );
     }
 
     #[test]
