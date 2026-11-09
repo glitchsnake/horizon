@@ -40,6 +40,7 @@ pub mod controller_ui;
 pub mod crash;
 pub mod custom_sky;
 pub mod datapack;
+pub mod directory_validator;
 pub mod dynamic_light;
 pub mod effects;
 pub mod environment;

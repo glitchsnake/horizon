@@ -4,6 +4,10 @@
 //! and an overlay resource root that layers the enabled packs over the
 //! vanilla resources (later packs win), so every loader sees one tree.
 mod cache;
+pub use crate::directory_validator::{
+    DirectoryValidator, DiscoveredPackSource, ForbiddenSymlinkInfo, PathAllowList,
+    default_validator_for, detect_pack_resources, parse_validator,
+};
 use crate::text::Style;
 use crate::{text::Text, zip::Zip};
 pub use horizon_client_core::pattern;
@@ -644,19 +648,29 @@ pub fn discover(resources: &Path, packs_dir: &Path) -> Vec<Pack> {
 /// The packs (folders and zips) in `dir`, by name, as `FolderRepositorySource`
 /// finds them; their compatibility is against `format`.
 pub fn folder(dir: &Path, format: (i64, i64)) -> Vec<Pack> {
-    let mut user: Vec<Pack> = fs::read_dir(dir)
-        .into_iter()
-        .flatten()
+    let validator = default_validator_for(Some(dir));
+    folder_with_validator(dir, format, &validator)
+}
+
+/// FolderRepositorySource.discoverPacks: discovers packs in `dir` validating symlinks against `validator`.
+pub fn folder_with_validator(
+    dir: &Path,
+    format: (i64, i64),
+    validator: &DirectoryValidator,
+) -> Vec<Pack> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut user: Vec<Pack> = entries
         .flatten()
         .filter_map(|e| {
             let path = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
-            let source = if path.is_dir() {
-                Source::Dir(path)
-            } else if name.ends_with(".zip") {
-                Source::Zip(path)
-            } else {
-                return None;
+            let mut issues = Vec::new();
+            let discovered = detect_pack_resources(&path, validator, &mut issues)?;
+            let source = match discovered {
+                DiscoveredPackSource::Dir(p) => Source::Dir(p),
+                DiscoveredPackSource::Zip(p) => Source::Zip(p),
             };
             pack_for(format!("file/{name}"), Text::literal(name), source, format)
         })
