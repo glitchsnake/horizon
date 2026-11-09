@@ -95,6 +95,8 @@ pub(super) struct SculkState {
     steps: FxHashMap<Who, Steps>,
     /// Items that have fallen since last touching the ground or water.
     falling_items: HashSet<u32>,
+    pub(super) item_throwers: FxHashMap<u32, [i32; 4]>,
+    landing_item_owner: Option<[i32; 4]>,
     /// The vehicle each rider had last tick and where it stood.
     mounts: FxHashMap<Who, (u32, [f64; 3])>,
     damaged: FxHashMap<u32, i64>,
@@ -763,13 +765,44 @@ impl Game<'_> {
         }
         ctx
     }
-    /// The saved UUID of a vibration's mob through the save layer's
-    /// `save_who_uuid`. `Who::Player` stays `None`: on a server it can be the
-    /// acting guest as well as the host, so it names no single entity here.
+    /// The saved UUID of a vibration's mob or player through the save layer.
     fn vibration_uuid(&self, who: Option<Who>) -> Option<[i32; 4]> {
         match who {
+            Some(Who::Player) => self.player_uuid(),
             Some(who @ Who::Mob(_)) => self.save_who_uuid(who),
             _ => None,
+        }
+    }
+    fn player_uuid(&self) -> Option<[i32; 4]> {
+        if let Some(conn) = self.lan_acting
+            && let Some(host) = &self.lan
+            && let Some(guest) = host.hub.guests.iter().find(|g| g.conn == conn)
+        {
+            return Some(horizon_client::lan::playerdata::uuid_ints(guest.uuid));
+        }
+        self.level
+            .player_uuid
+            .or_else(|| self.save_who_uuid(Who::Player))
+    }
+    fn is_player_uuid(&self, uuid: [i32; 4]) -> bool {
+        self.player_uuid() == Some(uuid)
+            || self.save_who_uuid(Who::Player) == Some(uuid)
+            || uuid
+                == horizon_client::lan::playerdata::uuid_ints(
+                    horizon_protocol::crypto::offline_uuid("Player"),
+                )
+            || self.lan.as_ref().is_some_and(|h| {
+                h.hub
+                    .guests
+                    .iter()
+                    .any(|g| horizon_client::lan::playerdata::uuid_ints(g.uuid) == uuid)
+            })
+    }
+    fn resolve_who(&self, uuid: [i32; 4]) -> Option<Who> {
+        if self.is_player_uuid(uuid) {
+            Some(Who::Player)
+        } else {
+            self.who_by_uuid(uuid)
         }
     }
     /// The mob at `index` hears a game event, if it is a warden or an allay.
@@ -1081,6 +1114,22 @@ impl Game<'_> {
                     let source = PositionSource::Block([key.0, key.1, key.2]);
                     self.vibration_particle(source, info.pos, center(key), travel);
                 }
+                if let Some((info, travel)) = tick.resumed {
+                    let source = PositionSource::Block([key.0, key.1, key.2]);
+                    let dest = center(key);
+                    let initial = info.distance.floor() as i32;
+                    let alpha = if initial > 0 {
+                        1.0 - (travel as f32 / initial as f32)
+                    } else {
+                        0.0
+                    };
+                    let current_pos = [
+                        info.pos[0] + (dest[0] - info.pos[0]) * f64::from(alpha),
+                        info.pos[1] + (dest[1] - info.pos[1]) * f64::from(alpha),
+                        info.pos[2] + (dest[2] - info.pos[2]) * f64::from(alpha),
+                    ];
+                    self.vibration_particle(source, current_pos, dest, travel);
+                }
                 if let Some(info) = tick.received {
                     self.sculk_receive(key, info)?;
                 }
@@ -1125,15 +1174,27 @@ impl Game<'_> {
                         e.last_frequency = frequency;
                     }
                     let power = sculk::redstone_strength(distance, radius);
-                    self.activate_sensor(key, info.source, power, frequency)?;
+                    let source = info
+                        .source
+                        .or_else(|| info.source_uuid.and_then(|u| self.resolve_who(u)));
+                    self.activate_sensor(key, source, power, frequency)?;
                 }
             }
             SculkKind::Shrieker => {
-                let by_player = info.owner.or(info.source);
-                self.try_shriek(
-                    key,
-                    by_player == Some(Who::Player) || self.rides_player(by_player),
-                )?;
+                let source = info
+                    .source
+                    .or_else(|| info.source_uuid.and_then(|u| self.resolve_who(u)));
+                let owner = info
+                    .owner
+                    .or_else(|| info.owner_uuid.and_then(|u| self.resolve_who(u)));
+                let is_player_source = info.source_uuid.is_some_and(|u| self.is_player_uuid(u));
+                let is_player_owner = info.owner_uuid.is_some_and(|u| self.is_player_uuid(u));
+                let by_player = owner.or(source);
+                let player_caused = by_player == Some(Who::Player)
+                    || is_player_source
+                    || is_player_owner
+                    || self.rides_player(by_player);
+                self.try_shriek(key, player_caused)?;
             }
             SculkKind::Catalyst => {}
         }
@@ -1845,9 +1906,17 @@ impl Game<'_> {
     fn tick_entity_events(&mut self) {
         self.tick_player_sculk_events();
         self.tick_mob_sculk_events();
-        if !self.sculk.falling_items.is_empty() {
+        if !self.sculk.falling_items.is_empty() || !self.sculk.item_throwers.is_empty() {
             let present: HashSet<u32> = self.dropped.iter().map(|item| item.id).collect();
             self.sculk.falling_items.retain(|id| present.contains(id));
+            self.sculk
+                .item_throwers
+                .retain(|id, _| present.contains(id));
+        }
+        for item in &self.dropped {
+            if let Some(thrower) = item.thrower {
+                self.sculk.item_throwers.insert(item.id, thrower);
+            }
         }
         // Dropped items are entities too: Entity.applyEffectsFromBlocks, from
         // ItemEntity.tick, so only for the items in entity-ticking chunks.
@@ -1883,6 +1952,7 @@ impl Game<'_> {
             self.sculk.falling_items.insert(id);
         }
         if on_ground && self.sculk.falling_items.remove(&id) {
+            self.sculk.landing_item_owner = self.sculk.item_throwers.remove(&id);
             // EntityType.ITEM: 0.25 by 0.25.
             let bounds = Aabb::new(
                 Vec3::new(position.x - 0.125, position.y, position.z - 0.125),
@@ -1897,6 +1967,7 @@ impl Game<'_> {
         if self.remote.is_some() || self.options.execution_role.is_client() {
             return;
         }
+        let owner_uuid = self.sculk.landing_item_owner.take();
         self.sculk_prepare();
         // mainSupportingBlockPos, or the block's state at getOnPosLegacy.
         let state = match self.supporting_block(position, bounds) {
@@ -1909,6 +1980,14 @@ impl Game<'_> {
         };
         let mut context = self.who_context(None, Some(state));
         context.living = living;
+        if let Some(owner) = owner_uuid {
+            context.owner_uuid = Some(owner);
+            context.owner = self.resolve_who(owner);
+            if self.is_player_uuid(owner) {
+                context.owner = Some(Who::Player);
+                context.player = true;
+            }
+        }
         self.post_game_event(
             "minecraft:hit_ground",
             [position.x, position.y, position.z],

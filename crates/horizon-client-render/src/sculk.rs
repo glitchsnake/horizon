@@ -232,6 +232,8 @@ impl Selector {
 pub struct Tick {
     /// A vibration was chosen: its travel time (the particle starts).
     pub started: Option<(Info, i32)>,
+    /// A vibration was reloaded from save: particle resumes from interpolated pos.
+    pub resumed: Option<(Info, i32)>,
     /// A vibration arrived.
     pub received: Option<Info>,
     /// `onDataChanged`.
@@ -261,6 +263,10 @@ impl Data {
             self.selector.start_over();
         }
         if let Some(info) = self.current {
+            if self.reload_particle {
+                self.reload_particle = false;
+                out.resumed = Some((info, self.travel));
+            }
             let mut changed = self.travel > 0;
             self.travel = (self.travel - 1).max(0);
             if self.travel <= 0 {
@@ -293,8 +299,11 @@ impl Data {
         Tag::compound(entries)
     }
     pub fn from_nbt(tag: &Tag) -> Self {
+        let current = tag.get("event").and_then(info_from_nbt);
+        let reload_particle = current.is_some();
         let mut data = Self {
-            current: tag.get("event").and_then(info_from_nbt),
+            current,
+            reload_particle,
             ..Self::default()
         };
         if let Some(Tag::Int(t)) = tag.get("event_delay") {
@@ -321,10 +330,32 @@ fn info_to_nbt(info: &Info) -> Tag {
         ),
     ];
     // `VibrationInfo.CODEC`: each UUID an int array of four, absent for none.
-    if let Some(u) = info.source_uuid {
+    let source_uuid = info.source_uuid.or_else(|| {
+        (info.source == Some(Who::Player)).then(|| {
+            let u = horizon_protocol::crypto::offline_uuid("Player");
+            [
+                (u >> 96) as u32 as i32,
+                (u >> 64) as u32 as i32,
+                (u >> 32) as u32 as i32,
+                u as u32 as i32,
+            ]
+        })
+    });
+    if let Some(u) = source_uuid {
         fields.push(("source", Tag::IntArray(u.to_vec())));
     }
-    if let Some(u) = info.owner_uuid {
+    let owner_uuid = info.owner_uuid.or_else(|| {
+        (info.owner == Some(Who::Player)).then(|| {
+            let u = horizon_protocol::crypto::offline_uuid("Player");
+            [
+                (u >> 96) as u32 as i32,
+                (u >> 64) as u32 as i32,
+                (u >> 32) as u32 as i32,
+                u as u32 as i32,
+            ]
+        })
+    });
+    if let Some(u) = owner_uuid {
         fields.push(("projectile_owner", Tag::IntArray(u.to_vec())));
     }
     Tag::compound(fields)
@@ -356,16 +387,27 @@ fn info_from_nbt(tag: &Tag) -> Option<Info> {
         }
         _ => return None,
     };
+    let source_uuid = uuid_field(tag, "source");
+    let owner_uuid = uuid_field(tag, "projectile_owner");
+    let offline = {
+        let u = horizon_protocol::crypto::offline_uuid("Player");
+        [
+            (u >> 96) as u32 as i32,
+            (u >> 64) as u32 as i32,
+            (u >> 32) as u32 as i32,
+            u as u32 as i32,
+        ]
+    };
+    let source = (source_uuid == Some(offline)).then_some(Who::Player);
+    let owner = (owner_uuid == Some(offline)).then_some(Who::Player);
     Some(Info {
         event,
         distance,
         pos,
-        // The live entities are found again by UUID only when needed; a
-        // loaded vibration names none of them.
-        source: None,
-        owner: None,
-        source_uuid: uuid_field(tag, "source"),
-        owner_uuid: uuid_field(tag, "projectile_owner"),
+        source,
+        owner,
+        source_uuid,
+        owner_uuid,
     })
 }
 
@@ -978,5 +1020,39 @@ mod tests {
         assert_eq!(back.spreader, e.spreader);
         assert_eq!(back.spreader.cursors[0].charge, 1000);
         assert_eq!(back.spreader.cursors[1].charge, 500);
+    }
+
+    #[test]
+    fn vibration_reloads_particle_and_player_source() {
+        let u = horizon_protocol::crypto::offline_uuid("Player");
+        let puuid = [
+            (u >> 96) as i32,
+            (u >> 64) as i32,
+            (u >> 32) as i32,
+            u as i32,
+        ];
+        let tag = Tag::compound([
+            (
+                "event",
+                Tag::compound([
+                    ("game_event", Tag::String("minecraft:step".into())),
+                    ("distance", Tag::Float(4.0f32.to_bits())),
+                    (
+                        "pos",
+                        Tag::List(vec![
+                            Tag::Double(1.0f64.to_bits()),
+                            Tag::Double(0),
+                            Tag::Double(0),
+                        ]),
+                    ),
+                    ("source", Tag::IntArray(puuid.to_vec())),
+                ]),
+            ),
+            ("event_delay", Tag::Int(3)),
+        ]);
+        let mut d = Data::from_nbt(&tag);
+        assert!(d.reload_particle && d.current.is_some_and(|c| c.source == Some(Who::Player)));
+        let tick = d.tick(10, true, true, |dist| dist as i32);
+        assert!(tick.resumed.is_some() && !d.reload_particle);
     }
 }

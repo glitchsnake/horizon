@@ -96,6 +96,9 @@ impl Game<'_> {
                 continue;
             }
             if merging && !no_physics {
+                if let Some(thrower) = item.thrower {
+                    self.sculk.item_throwers.insert(item.id, thrower);
+                }
                 self.item_landing_event(item.id, item.previous, item.position, item.on_ground);
                 self.entity_powder_snow_particles(
                     item.previous,
