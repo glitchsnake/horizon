@@ -48,8 +48,9 @@ impl PathAllowList {
         let mut entries = Vec::new();
         for (i, line) in reader.lines().enumerate() {
             let l = line.map_err(|e| e.to_string())?;
-            let s = l.trim();
-            if s.is_empty() || s.starts_with('#') {
+            // `ConfigEntry.parse`: the line as written, blank or `#` lines skipped.
+            let s = l.as_str();
+            if s.trim().is_empty() || s.starts_with('#') {
                 continue;
             }
             if !s.starts_with('[') {
@@ -113,11 +114,9 @@ impl PathAllowList {
     }
 }
 
+/// `EntryType.PREFIX`: `path.toString().startsWith(pattern)`.
 fn matches_prefix(prefix: &str, target: &str) -> bool {
-    let (p, t) = (prefix.trim_end_matches('/'), target.trim_end_matches('/'));
-    t == p
-        || target.starts_with(prefix)
-        || target.strip_prefix(p).is_some_and(|r| r.starts_with('/'))
+    target.starts_with(prefix)
 }
 
 fn match_glob(p: &str, t: &str) -> bool {
@@ -171,20 +170,6 @@ fn glob_rec(mut p: &[u8], mut t: &[u8]) -> bool {
     t.is_empty()
 }
 
-fn clean_path(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            c => out.push(c.as_os_str()),
-        }
-    }
-    out
-}
-
 /// DirectoryValidator: validates directories and symlink targets against the allow list.
 #[derive(Clone, Debug, Default)]
 pub struct DirectoryValidator {
@@ -205,17 +190,9 @@ impl DirectoryValidator {
     /// DirectoryValidator.validateSymlink: validates that a symlink's target is allowed.
     pub fn validate_symlink(&self, path: &Path, issues: &mut Vec<ForbiddenSymlinkInfo>) {
         match fs::read_link(path) {
+            // The link's own target, as written (`Files.readSymbolicLink`), not resolved.
             Ok(target) => {
-                let resolved = path
-                    .parent()
-                    .map(|p| p.join(&target))
-                    .unwrap_or_else(|| target.clone());
-                let (ct, cr) = (clean_path(&target), clean_path(&resolved));
-                if !self.allow_list.matches(&target)
-                    && !self.allow_list.matches(&ct)
-                    && !self.allow_list.matches(&resolved)
-                    && !self.allow_list.matches(&cr)
-                {
+                if !self.allow_list.matches(&target) {
                     issues.push(ForbiddenSymlinkInfo {
                         link: path.to_path_buf(),
                         target,
@@ -290,30 +267,11 @@ pub fn parse_validator(config_path: &Path) -> DirectoryValidator {
     }
 }
 
-/// Returns the default DirectoryValidator by searching for allowed_symlinks.txt
-/// in standard locations (dir parent, player_dir, game_home, current dir).
-pub fn default_validator_for(dir: Option<&Path>) -> DirectoryValidator {
-    let mut candidates = Vec::new();
-    if let Some(d) = dir {
-        candidates.push(d.join("allowed_symlinks.txt"));
-        if let Some(p) = d.parent() {
-            candidates.push(p.join("allowed_symlinks.txt"));
-            if let Some(gp) = p.parent() {
-                candidates.push(gp.join("allowed_symlinks.txt"));
-            }
-        }
-    }
-    candidates.push(crate::logging::player_dir().join("allowed_symlinks.txt"));
-    candidates.push(crate::logging::game_home().join("allowed_symlinks.txt"));
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("allowed_symlinks.txt"));
-    }
-    candidates
-        .into_iter()
-        .find(|c| c.is_file())
-        .map_or_else(DirectoryValidator::no_symlinks_allowed, |c| {
-            parse_validator(&c)
-        })
+/// `Minecraft.directoryValidator`: `allowed_symlinks.txt` in the game folder, which is the
+/// working directory (`--game-dir` moves into it), and nowhere else.
+pub fn game_dir_validator() -> DirectoryValidator {
+    let dir = std::env::current_dir().unwrap_or_default();
+    parse_validator(&dir.join("allowed_symlinks.txt"))
 }
 
 /// The detected source of a pack on disk.
@@ -378,6 +336,8 @@ mod tests {
         let text = "# comment\n[prefix]/allowed/prefix\n[glob]**/*.zip\n";
         let list = PathAllowList::read_plain(text.as_bytes()).unwrap();
         assert!(list.matches(Path::new("/allowed/prefix/pack")));
+        // `startsWith` on the path's text, as vanilla's PREFIX entry compares.
+        assert!(list.matches(Path::new("/allowed/prefixed")));
         assert!(list.matches(Path::new("deep/folder/pack.zip")));
         assert!(!list.matches(Path::new("/forbidden/pack")));
         let validator = DirectoryValidator::new(list);

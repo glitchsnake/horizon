@@ -6,7 +6,7 @@
 mod cache;
 pub use crate::directory_validator::{
     DirectoryValidator, DiscoveredPackSource, ForbiddenSymlinkInfo, PathAllowList,
-    default_validator_for, detect_pack_resources, parse_validator,
+    detect_pack_resources, game_dir_validator, parse_validator,
 };
 use crate::text::Style;
 use crate::{text::Text, zip::Zip};
@@ -651,7 +651,7 @@ pub fn folder(dir: &Path, format: (i64, i64)) -> Vec<Pack> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let validator = default_validator_for(Some(dir));
+    let validator = game_dir_validator();
     let mut user: Vec<Pack> = entries
         .flatten()
         .filter_map(|e| {

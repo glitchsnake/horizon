@@ -149,7 +149,7 @@ pub fn discover_folder(dir: &Path) -> Vec<DataPack> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let validator = crate::directory_validator::default_validator_for(Some(dir));
+    let validator = crate::directory_validator::game_dir_validator();
     let mut packs = Vec::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -342,7 +342,7 @@ pub fn temp_folder() -> std::io::Result<PathBuf> {
 /// does (a folder zipped by the system, which adds a wrapper). Copied into
 /// `dir`; false when `path` is no pack, or when part of it could not be copied.
 pub fn copy_pack(path: &Path, dir: &Path) -> bool {
-    let validator = crate::directory_validator::default_validator_for(Some(dir));
+    let validator = crate::directory_validator::game_dir_validator();
     let mut issues = Vec::new();
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
