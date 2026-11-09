@@ -121,105 +121,42 @@ fn matches_prefix(prefix: &str, target: &str) -> bool {
 }
 
 fn match_glob(p: &str, t: &str) -> bool {
-    let (p, t): (Vec<char>, Vec<char>) = (p.chars().collect(), t.chars().collect());
-    glob_slice(&p, &t)
+    glob_rec(p.as_bytes(), t.as_bytes())
 }
 
-fn glob_slice(mut p: &[char], mut t: &[char]) -> bool {
+fn glob_rec(mut p: &[u8], mut t: &[u8]) -> bool {
     while !p.is_empty() {
-        if p.starts_with(&['*', '*']) {
+        if p.starts_with(b"**") {
             let rest = &p[2..];
-            if let Some(&'/') = rest.first() {
-                if glob_slice(&rest[1..], t) {
-                    return true;
-                }
-                for i in 0..t.len() {
-                    if t[i] == '/' && glob_slice(&rest[1..], &t[i + 1..]) {
-                        return true;
-                    }
-                }
-                return false;
+            let rest_after_slash = rest.strip_prefix(b"/").unwrap_or(rest);
+            if glob_rec(rest_after_slash, t) {
+                return true;
             }
-            return (0..=t.len()).any(|i| glob_slice(rest, &t[i..]));
-        } else if p[0] == '*' {
-            let rest = &p[1..];
-            for i in 0..=t.len() {
-                if i > 0 && t[i - 1] == '/' {
-                    break;
-                }
-                if glob_slice(rest, &t[i..]) {
+            for i in 0..t.len() {
+                if glob_rec(rest_after_slash, &t[i..]) {
                     return true;
                 }
             }
             return false;
-        } else if p[0] == '?' {
-            if t.is_empty() || t[0] == '/' {
+        } else if p[0] == b'*' {
+            let rest = &p[1..];
+            for i in 0..=t.len() {
+                if i > 0 && t[i - 1] == b'/' {
+                    break;
+                }
+                if glob_rec(rest, &t[i..]) {
+                    return true;
+                }
+            }
+            return false;
+        } else if p[0] == b'?' {
+            if t.is_empty() || t[0] == b'/' {
                 return false;
             }
             p = &p[1..];
             t = &t[1..];
-        } else if p[0] == '[' {
-            let Some(close) = p.iter().position(|&c| c == ']') else {
-                return false;
-            };
-            if t.is_empty() || t[0] == '/' {
-                return false;
-            }
-            let (neg, content) = if p.get(1) == Some(&'!') || p.get(1) == Some(&'^') {
-                (true, &p[2..close])
-            } else {
-                (false, &p[1..close])
-            };
-            let mut matched = false;
-            let mut i = 0;
-            while i < content.len() {
-                if i + 2 < content.len() && content[i + 1] == '-' {
-                    if t[0] >= content[i] && t[0] <= content[i + 2] {
-                        matched = true;
-                        break;
-                    }
-                    i += 3;
-                } else {
-                    if t[0] == content[i] {
-                        matched = true;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            if matched == neg {
-                return false;
-            }
-            p = &p[close + 1..];
-            t = &t[1..];
-        } else if p[0] == '{' {
-            let (mut depth, mut close, mut alts, mut start) = (0, 0, Vec::new(), 1);
-            for (idx, &c) in p.iter().enumerate() {
-                if c == '{' {
-                    depth += 1;
-                } else if c == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = idx;
-                        alts.push(&p[start..idx]);
-                        break;
-                    }
-                } else if c == ',' && depth == 1 {
-                    alts.push(&p[start..idx]);
-                    start = idx + 1;
-                }
-            }
-            if close == 0 {
-                return false;
-            }
-            let after = &p[close + 1..];
-            return alts.into_iter().any(|alt| {
-                let mut c = alt.to_vec();
-                c.extend_from_slice(after);
-                glob_slice(&c, t)
-            });
         } else {
-            let (ch, advance) = if p[0] == '\\' && p.len() > 1 {
+            let (ch, advance) = if p[0] == b'\\' && p.len() > 1 {
                 (p[1], 2)
             } else {
                 (p[0], 1)

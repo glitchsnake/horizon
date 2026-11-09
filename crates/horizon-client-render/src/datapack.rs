@@ -146,24 +146,16 @@ pub fn discover(world: &Path) -> Vec<DataPack> {
 /// `FolderRepositorySource.loadPacks`: packs in Create World's temporary
 /// folder or a world's data-pack directory, with required folder metadata.
 pub fn discover_folder(dir: &Path) -> Vec<DataPack> {
-    let validator = crate::directory_validator::default_validator_for(Some(dir));
-    discover_folder_with_validator(dir, &validator)
-}
-
-/// `FolderRepositorySource.loadPacks`: packs in folder validating symlinks against validator.
-pub fn discover_folder_with_validator(
-    dir: &Path,
-    validator: &crate::directory_validator::DirectoryValidator,
-) -> Vec<DataPack> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
+    let validator = crate::directory_validator::default_validator_for(Some(dir));
     let mut packs = Vec::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let path = e.path();
         let mut issues = Vec::new();
-        match crate::directory_validator::detect_pack_resources(&path, validator, &mut issues) {
+        match crate::directory_validator::detect_pack_resources(&path, &validator, &mut issues) {
             Some(crate::directory_validator::DiscoveredPackSource::Dir(p))
                 if folder_metadata_present(&p) =>
             {
@@ -351,15 +343,6 @@ pub fn temp_folder() -> std::io::Result<PathBuf> {
 /// `dir`; false when `path` is no pack, or when part of it could not be copied.
 pub fn copy_pack(path: &Path, dir: &Path) -> bool {
     let validator = crate::directory_validator::default_validator_for(Some(dir));
-    copy_pack_with_validator(path, dir, &validator)
-}
-
-/// PackDetector: copies pack validating that it does not contain forbidden symlinks.
-pub fn copy_pack_with_validator(
-    path: &Path,
-    dir: &Path,
-    validator: &crate::directory_validator::DirectoryValidator,
-) -> bool {
     let mut issues = Vec::new();
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
