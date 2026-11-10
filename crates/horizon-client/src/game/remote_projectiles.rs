@@ -753,24 +753,24 @@ impl Game<'_> {
         let me = self.remote_player_id();
         let mut rockets = std::mem::take(&mut self.rockets);
         for r in &mut rockets {
+            if me.is_some() && me == r.attached_to {
+                continue;
+            }
             r.remote_step(&mut SceneCollisions {
                 world: &self.world,
                 binding: self.collision,
                 subject: None,
             });
-            if let Some(target) = r.attached_to {
-                if me == Some(target) {
-                    continue;
-                }
-                if let Some(m) = self.mobs.iter().find(|m| m.id == target) {
-                    // Another player's motion is not known here: its step.
-                    r.velocity = Vec3::new(
-                        m.position.x - r.previous.x,
-                        m.position.y - r.previous.y,
-                        m.position.z - r.previous.z,
-                    );
-                    r.position = m.position;
-                }
+            if let Some(target) = r.attached_to
+                && let Some(m) = self.mobs.iter().find(|m| m.id == target)
+            {
+                // Another player's motion is not known here: its step.
+                r.velocity = Vec3::new(
+                    m.position.x - r.previous.x,
+                    m.position.y - r.previous.y,
+                    m.position.z - r.previous.z,
+                );
+                r.position = m.position;
             }
             self.rocket_spark(r);
         }

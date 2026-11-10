@@ -6684,8 +6684,7 @@ impl Game<'_> {
         }
         // A stand riding the player follows this move (tickPassenger).
         self.seat_own_stands();
-        // Other players on this player (possibly through a plugin seat) follow this tick too;
-        // the full pass only when something rides this player.
+        // Other players on this player (possibly through a plugin seat) follow this tick too.
         if self.remote.as_ref().is_some_and(|r| {
             let me = r.entity_id as u32;
             r.passenger_vehicles.values().any(|&v| v == me)
@@ -6704,6 +6703,7 @@ impl Game<'_> {
         if !self.replay.playing() {
             self.tick_player_model();
         }
+        self.tick_own_rockets();
         self.client_hooks_tick();
         if !dead {
             self.remote_tick_using();
