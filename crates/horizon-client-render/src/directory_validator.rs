@@ -132,7 +132,7 @@ fn glob_rec(mut p: &[u8], mut t: &[u8]) -> bool {
                 return true;
             }
             for i in 0..t.len() {
-                if glob_rec(rest_after_slash, &t[i..]) {
+                if t[i] == b'/' && glob_rec(rest_after_slash, &t[i + 1..]) {
                     return true;
                 }
             }
@@ -333,13 +333,25 @@ mod tests {
 
     #[test]
     fn test_symlink_validator_allowlist() {
-        let text = "# comment\n[prefix]/allowed/prefix\n[glob]**/*.zip\n";
+        let text = "# comment\n[prefix]/allowed/prefix\n[glob]**/*.zip\n[regex].*\\.mod\n";
         let list = PathAllowList::read_plain(text.as_bytes()).unwrap();
         assert!(list.matches(Path::new("/allowed/prefix/pack")));
         // `startsWith` on the path's text, as vanilla's PREFIX entry compares.
         assert!(list.matches(Path::new("/allowed/prefixed")));
         assert!(list.matches(Path::new("deep/folder/pack.zip")));
+        assert!(list.matches(Path::new("pack.zip")));
+        assert!(list.matches(Path::new("/mods/custom.mod")));
         assert!(!list.matches(Path::new("/forbidden/pack")));
+
+        // `**` must match at slash boundaries, not arbitrary substrings
+        assert!(!match_glob("**/foo", "afoo"));
+        assert!(match_glob("**/foo", "foo"));
+        assert!(match_glob("**/foo", "bar/foo"));
+        assert!(match_glob("**/foo", "a/b/foo"));
+
+        let no_symlinks = PathAllowList::default();
+        assert!(!no_symlinks.matches(Path::new("/any/path")));
+
         let validator = DirectoryValidator::new(list);
         let mut issues = Vec::new();
         let tmp = std::env::temp_dir().join(format!("mc_symlink_test_{}", std::process::id()));
